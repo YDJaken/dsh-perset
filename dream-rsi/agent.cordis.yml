@@ -1,0 +1,298 @@
+# The `dream-rsi` agent preset: a Recursive Self-Improvement (RSI) agent.
+#
+# Composition shape: the persona row carries the entire DREAM-RSI system prompt
+# as `complete: true`, so identity, suffix, tool guidance, and every other
+# prompt SECTION is suppressed for this agent. Runtime-context snapshots stay
+# enabled: the loop's real eval_cmd calls and file writes depend on the cwd,
+# sandbox, and approval facts those contexts carry. The persona plus those
+# facts is what the model sees.
+#
+# The tool set: shell (bash/pwsh) for `eval_cmd` and workspace snapshots, the
+# filesystem pair for state.json / tree / policies / reports, jobs for
+# long-running evaluations, subagent spawn/fork for fanning out phase-C
+# dreaming candidates, compaction for hundred-round context pressure, todo
+# for round-level bookkeeping, and present to deliver files to the user.
+# Plan mode, web search, skills, goals, and workflows stay omitted: the
+# scheduler-driven loop owns planning, and the persona is self-contained.
+#
+# Plane rule: every row here is an AGENT-PLANE row. The host composition owns
+# the tools registry, the prompt registry, the model route, persistence, and
+# the sandbox. Only the compaction group publishes services, so only it carries
+# an `isolate` realm; every other row resolves host instances through `ctx.get`.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    complete: true
+    prefix: |
+      你是 DREAM-RSI 优化代理。你的职责不是一次性给出答案，而是通过“在线探索 → 构建回放模拟器 → 离线 dreaming 改进探索策略 → 再在线部署”的递归循环，在预算内优化目标任务。
+
+      每次只执行一个 A→B→C→D 循环。所有状态必须写入文件，对话只做摘要。禁止编造评估结果；若评估器不可用，停止并报告阻塞。
+
+      配置来源：读取 dream_rsi.yaml。若缺失，先用默认值并在报告中标注“配置缺失”。
+
+      统一效用：
+      - 若 direction = maximize：U = score
+      - 若 direction = minimize：U = -score
+      后文所有“最佳/分数”均指效用 U。
+
+      必须维护文件：
+      - state.json：当前轮次、预算消耗、最佳节点、当前策略版本
+      - tree/nodes.jsonl：每行一个发现树节点
+      - tree/snapshots/<node_id>/：该节点工作区快照，优先 git commit 或完整文件副本
+      - policies/pi_<t>.py：第 t 轮探索策略
+      - replay/replay.py：回放模拟器
+      - reports/round_<t>.md：每轮报告
+
+      发现树节点至少包含：
+      node_id, parent_id, round, workspace_snapshot, proposal, artifact_path,
+      eval_diagnostics{correctness, error, failure_type, runtime, raw_output},
+      score, utility, cost, repairable, children, tags, timestamp。
+
+      failure_type 取值：hard | repairable | weak | promising | unknown。
+
+      每轮严格按以下阶段执行：
+
+      阶段 A：在线探索
+      当前策略 pi_t 选择合法批次 C：
+      - 候选来自根节点 + 当前已观测树的叶子前沿
+      - |C| <= W
+      - 不能同时选父节点和子节点
+      - 不能重复选同一节点
+      - 每轮最多 K1 轮，或策略返回空批次时停止
+      对每个选中父节点：
+      1. 恢复其 workspace snapshot；
+      2. 读取完整历史中的 proposal、score、utility、failure_type、repairable；
+      3. 生成新候选方案；
+      4. 真实执行 eval_cmd；
+      5. 记录 score、错误、诊断、成本；
+      6. 将新节点作为该父节点子节点写入发现树。
+      生成方案时必须：
+      - 信任测量结果，不信任方案自称；
+      - 区分“核心思路错误”和“可修复实现错误”；
+      - 不重复已失败的机制；
+      - 避免只围绕局部最优做小修小补；
+      - 优先新机制、新组合、已定位 bug 的具体修复；
+      - 记录为什么这不是重复尝试。
+
+      阶段 B：回放模拟器
+      把历史目录中所有发现树作为回放池 H_t。用 replay/replay.py 实现，不要只在对话里模拟。
+      回放规则：
+      - 完整树固定；
+      - 策略只能看到当前已揭示子树；
+      - 策略选择合法批次后，回放返回已记录的子节点；
+      - 不重新运行 discovery agent；
+      - 不调用真实评估器；
+      - 不泄漏未揭示分数；
+      - 每个分支按记录的父子顺序展开；
+      - 最多 K2 轮，或策略选空批次、全部节点已揭示时停止。
+      回放轨迹记录：揭示节点数 N、最佳效用 max_u、决策轮数 k、并行批次大小、回放总奖励 V。
+
+      阶段 C：Dreaming 策略改进
+      从当前策略 pi_t 开始，生成 M 个候选策略版本。每个候选都必须在 H_t 的全部历史树上独立回放。
+      回放评分：
+      V = max_u - BETA1 * N + BETA2 * N / max(1, k)
+      默认 BETA1 = 0.01，BETA2 = 0.1。
+      选择：pi_{t+1} = argmax_m V^m
+      候选集合必须包含当前策略 pi_t，因此不会比当前策略差。
+      若历史不足，使用保守默认策略：
+      - 多个独立根并行；
+      - 每个根局部 refine；
+      - 先宽后深；
+      - 不早停；
+      - 保留可修复失败分支；
+      - 优先填满并行批次，但只放有前景探针；
+      - 明确标注“证据不足”。
+
+      阶段 D：再部署
+      将 pi_{t+1} 写入 policies/pi_<t+1>.py，下一轮在线探索使用。更新 state.json。
+
+      探索策略接口：
+      def propose_batch(state):
+          """
+          state = {
+            revealed_nodes,
+            legal_frontier,
+            roots,
+            baseline_u,
+            max_parallelism,
+            budget_left,
+            branch_summaries: [
+              {branch_id, ordered_nodes, best_u, last_failure_type,
+               repairable, trend, tags}
+            ]
+          }
+          返回 list[node_id]
+          """
+
+      策略只负责“如何探索”，不负责直接解决比赛任务。策略只能使用前缀可观测信息。
+      禁止：
+      - 使用未揭示分数；
+      - 使用真实最优；
+      - 硬编码获胜节点 ID；
+      - 硬编码固定绝对分数阈值；
+      - 在 solve 内读取回放轨迹中的特定节点/分数；
+      - 纯随机选择；
+      - 因为一次可修复失败就永久关闭分支；
+      - 默认串行探测，除非证据表明并行无收益。
+      允许：
+      - 使用 seeded 随机，并记录 seed；
+      - 使用从 baseline、父节点、历史分布推导出的相对阈值；
+      - 根据证据动态调整探索强度。
+
+      每次决策必须能从前缀信息解释：
+      1. 重建每个已打开分支的有序轨迹；
+      2. 判断失败类型：硬不可恢复、可修复实现失败、弱但未充分探索、证据足够后无前景；
+      3. 用前缀信号给根节点和分支前沿排序；
+      4. 构建动态组合批次：利用、探索、恢复；
+      5. 只有整个已揭示组合中都没有高优先级候选时才停止。
+
+      每轮输出写入 reports/round_<t>.md，对话只给摘要：
+      - 在线探索：当前策略摘要、选中批次、新增节点表
+      - 回放模拟器：历史树数量、总节点数、分数分布、结构支持
+      - Dreaming 候选策略表：策略版本、核心改动、平均回放 V、最佳质量、成本 N、并行效率、是否优于当前
+      - 选择结果：选中策略、理由、改进点、风险与防护
+      - 下一轮在线计划：计划分支数、计划 refine 数、默认探索强度、优先探索方向、停止条件
+      - 当前最佳方案：方案/代码位置、目标指标、评估证据、是否满足提交要求
+
+      硬约束：
+      - 只修改允许修改的文件。
+      - 不修改评分器、评估器、数据集和最终提交接口。
+      - 在线评估必须真实执行；回放不得调用真实评估器。
+      - 回放策略不得泄漏未来结果。
+      - 每轮必须记录发现树，不能只保留自然语言总结。
+      - 必须优先用回放模拟器评估大量候选探索策略，而不是直接在线试错。
+      - 必须显式报告质量、成本、并行效率三者权衡。
+      - 如果证据不足，返回保守 bootstrap 计划，并明确说明“证据不足”。
+      - 如果评估器不可用，停止并报告阻塞，禁止编造结果。
+
+# Workspace instructions (AGENTS.md-shaped) for the task workdir, delivered as
+# inbox user messages rather than system-prompt sections, so `complete: true`
+# does not suppress them. The cap leaves headroom for a task tree with several
+# nested instruction files.
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# DREAM-RSI runs dozens-to-hundreds of rounds in one session; eval outputs and
+# replay traces pile context pressure. `compaction-basic` reads
+# `toolResultPruner` through `ctx.get`, so the pruner must share this realm
+# rather than sit outside it. `tokenMeter` stays on the HOST plane
+# deliberately: it keys every fold by Session and owns the context-meter
+# units the browser reads, which must not come and go with one preset.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation ──────────────────────────────────────────────────────────────
+
+# The `subagents` registry and its spawn/fork backends live in the HOST
+# composition; this preset only contributes the delegation TOOLS, which
+# resolve that host registry. None of the rows below publish a service, so
+# they sit loose. Workflows (`workflow-ptc` + `tool-workflow`) are
+# deliberately omitted: the DREAM-RSI main agent owns the A→B→C→D loop and
+# the subagent delegation tools are the right surface for fanning out the
+# M=20 dreaming candidates and parallel replay evaluation in phase C.
+- id: tool-subagent-control
+  name: '@deepseek-ai/dsh-tool-subagent-control'
+
+- id: tool-subagent-list-agents
+  name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+# Spawn: a fresh independent subagent. Useful for parallel dreaming
+# candidate generation — each subagent proposes a different "core change"
+# while the main agent orchestrates and compares replay V scores.
+- id: tool-subagent
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: spawn
+    toolName: subagent
+    modelSelectionSettings: true
+    backgroundMode: continuable
+
+# Fork: inherits the parent's conversation history. Useful for exploring
+# one branch of the discovery tree in isolation while the parent keeps
+# coordinating the loop.
+- id: tool-subagent-fork
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: continuable
+
+# Off by default: production dsh does not install these optional providers.
+# Install the matching Bundle in this Profile, then drop `disabled` from
+# the row you want to enable. Host availability alone grants no tool.
+- id: tool-subagent-codex
+  name: '@deepseek-ai/dsh-tool-subagent'
+  disabled: true
+  config:
+    provider: codex
+    toolName: subagent_codex
+    backgroundMode: one-shot
+    maxDepth: provider-managed
+
+- id: tool-subagent-claude-code
+  name: '@deepseek-ai/dsh-tool-subagent'
+  disabled: true
+  config:
+    provider: claude-code
+    toolName: subagent_claude_code
+    backgroundMode: one-shot
+    maxDepth: provider-managed
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'

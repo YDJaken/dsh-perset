@@ -1,0 +1,63 @@
+# DREAM-RSI reference configuration.
+#
+# This file is the reference template shipped with the dream-rsi preset.
+# The agent reads it at the start of each round to know which task, which
+# evaluator, and which budget to use. Copy this file into your task workspace
+# (or any path the agent can read at session start), then edit the values
+# below. Placeholders in `{...}` must be replaced with real values before
+# the first round — `task.name`, `task.metric`, `task.eval_cmd`, the
+# `paths.*` entries, and every entry in `paths.allowed_paths`.
+
+task:
+  name: "{比赛任务}"
+  metric: "{指标名}"
+  direction: "maximize"        # maximize | minimize
+  eval_cmd: "{评估命令}"
+
+budget:
+  total_calls: null            # 总调用数，null 表示不限制
+  total_time: null             # 总时间，如 "6h"
+  total_rounds: 100            # 总在线轮数
+  online_rounds_per_cycle: 1   # 每个 DREAM-RSI 循环的在线轮数 K1
+  replay_rounds_max: 50        # 回放最大轮数 K2
+  dreaming_candidates: 20      # 每轮 dreaming 候选策略数 M
+
+parallelism:
+  W: 8                         # 并行工作数
+
+paths:
+  workdir: "{工作目录}"
+  history_dir: "{历史目录}"
+  current_best: "{当前方案}"
+  allowed_paths:
+    - "{允许修改范围}"
+  forbidden_paths:
+    - "评分器"
+    - "评估器"
+    - "数据集"
+    - "真实最优答案"
+    - "未公开数据"
+    - "最终提交接口"
+
+files:
+  state: "state.json"
+  nodes: "tree/nodes.jsonl"
+  snapshots: "tree/snapshots"
+  policies: "policies"
+  replay: "replay/replay.py"
+  reports: "reports"
+
+dreaming:
+  beta1: 0.01
+  beta2: 0.1
+  default_exploration_strength: 0.5
+  include_current_policy: true
+
+replay:
+  seed: 42
+  max_replay_trees: null       # null 表示全部历史树
+  return_children_in_recorded_order: true
+
+reporting:
+  write_round_report: true
+  conversation_mode: "summary_only"

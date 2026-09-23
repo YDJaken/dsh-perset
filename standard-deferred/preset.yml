@@ -1,0 +1,3 @@
+name: 标准模式 · 首轮精简
+description: 在标准模式基础上，对话首轮只暴露 shell/编辑/读取等极简工具集，让模型先从提示词思考；自第二轮开始注入全部工具（subagent、workflow、web_search、skill、goal、todo 等）。适合希望降低首轮工具噪声的场景。
+order: 2
