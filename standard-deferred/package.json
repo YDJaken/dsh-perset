@@ -1,0 +1,12 @@
+{
+  "name": "@local/dsh-standard-deferred",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Standard preset with first-turn-minimal tool trim: on a brand-new session, the first assembly sees only shell + read/write/edit/glob/grep + ask_user + web_search + todo + jobs; the full catalog arrives on the next step. Bundle-patch format for DeepSeek Harness.",
+  "type": "module",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

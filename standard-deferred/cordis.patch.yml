@@ -1,0 +1,250 @@
+# The `standard-deferred` agent preset.
+#
+# Bundle-patch format: this file is consumed by `@deepseek-ai/dsh-agent-preset`
+# after `plugin_manager install_bundle` links the package into the profile's
+# `node_modules`. The `id: preset-standard-deferred` row wraps the entire
+# preset declaration; its `config.id` is the preset identity
+# (`standard-deferred`) and its `config.plugins` is the agent-plane row list,
+# activated under this preset's standing scope.
+#
+# This preset mirrors the shipped `standard` preset's composition, but layers
+# in a `first-turn-minimal` hook (top-level, see below) that trims the
+# model-facing catalog on a brand-new session's first assembly for agents
+# joined to this preset. From the second step onward the full catalog is
+# restored automatically. See first-turn-minimal.mjs for the gate.
+#
+# `first-turn-minimal` lives at this bundle's TOP-LEVEL `insert:` list, NOT
+# inside the preset's `config.plugins[]`. Reason: dsh-app-boot's
+# `anchorInsertedPluginNames` only walks top-level rows when rewriting
+# relative `./xxx.mjs` names against the patch file's directory. Relative
+# names declared inside `config.plugins[]` keep their bare form, and
+# `mountPreset` later resolves them against the preset's `ctx.baseUrl` —
+# which is the profile directory, not this patch file — so a relative path
+# there would always fail to resolve. Hosting the plugin at the bundle top
+# level keeps `./first-turn-minimal.mjs` anchored next to this file, and
+# the hook itself filters by `agentPresets.composedPreset(...) === 'standard-deferred'`
+# so it stays scoped to this preset's agents only.
+#
+# The preset row itself lives inside the same `- insert:` block: a bare
+# `- id: preset-standard-deferred` would be read as a config override
+# against a row that doesn't exist yet, and the include layer would silently
+# drop it (log: `[@local/dsh-standard-deferred] patch: entry
+# "preset-standard-deferred" not found`).
+#
+# Plane rule: every row below is an AGENT-PLANE row. The host composition owns
+# the tools registry, the prompt registry, the model route, persistence, and
+# the sandbox. Only the compaction and delegation groups publish services, so
+# they carry `isolate` realms; every other row resolves host instances through
+# `ctx.get`.
+
+# ── identity + preset row + deferred tool injection ─────────────────────────
+
+- insert:
+    # ── deferred tool injection ────────────────────────────────────────────
+    # Top-level so `anchorInsertedPluginNames` can resolve the relative path
+    # beside this patch file. The hook filters its assembly output to the
+    # `standard-deferred` preset's agents via `agentPresets.composedPreset`.
+    - id: first-turn-minimal
+      name: './first-turn-minimal.mjs'
+      inject: ['agentPresets']
+      config:
+        minimalTools:
+          - ask_user_question
+          - pwsh
+          - bash
+          - read
+          - read_image
+          - write
+          - edit
+          - glob
+          - grep
+          - web_search
+          - todo_write
+          - job_output
+          - job_kill
+
+    # ── the preset declaration ───────────────────────────────────────────
+    - id: preset-standard-deferred
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: standard-deferred
+        name: 标准模式 · 首轮精简
+        description: 在标准模式基础上，对话首轮只暴露 shell/编辑/读取等极简工具集，让模型先从提示词思考；自第二轮开始注入全部工具（subagent、workflow、web_search、skill、goal、todo 等）。适合希望降低首轮工具噪声的场景。
+        order: 2
+        plugins:
+
+          # ── identity ─────────────────────────────────────────────────────────
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              suffix: Your working directory is {{cwd}}.
+              prefix: >-
+                You are a coding agent powered by the {{model}} model.
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # ── shell ─────────────────────────────────────────────────────────────
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+
+          # ── filesystem ─────────────────────────────────────────────────────────
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # ── background jobs ───────────────────────────────────────────────────
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+
+          # ── skills ────────────────────────────────────────────────────────────
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # ── goals ─────────────────────────────────────────────────────────────
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+
+          # ── plan mode ─────────────────────────────────────────────────────────
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+          # ── compaction ─────────────────────────────────────────────────────────
+          # `compaction-basic` reads `toolResultPruner` through `ctx.get`, so
+          # the pruner must share this realm rather than sit outside it.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+          # ── delegation and workflows ──────────────────────────────────────────
+          # The `subagents` registry and its spawn/fork backends live in the
+          # HOST composition; this preset contributes the delegation TOOLS,
+          # which resolve that host registry. Only the `workflow-ptc` row
+          # needs an entry-local realm because nothing outside an agent
+          # reads the workflow engine; everything else resolves the host
+          # registry by `ctx.get`.
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  backgroundMode: continuable
+
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+
+              # Off by default: production dsh does not install these
+              # optional providers. Install the matching Bundle in this
+              # Profile, then drop `disabled` from the row you want to
+              # enable. Host availability alone grants no tool.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                backgroundMode: one-shot
+                maxDepth: provider-managed
+
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+
+          # ── remaining model-facing rows ───────────────────────────────────────
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000

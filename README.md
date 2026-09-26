@@ -1,6 +1,6 @@
 # DSH Agent Presets · DREAM-RSI 与标准首轮精简
 
-本仓库提供两个面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的代理预设（Agent Preset），可以直接放进本地 `~/.dsh/.agent-presets/` 目录启用，不需要修改 DSH 源码或重新打包。
+本仓库提供两个面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的**代理预设 bundle**。每个目录是一个普通的 npm 包，由 DSH 的 plugin-manager 通过 `install_bundle` 链接进 profile 的 `node_modules`，**不再**走旧的 `~/.dsh/.agent-presets/` 目录扫描路径。
 
 - `dream-rsi/` —— 递归自我改进循环。给一段评估器，让 Agent 在预算内自动迭代方案。
 - `standard-deferred/` —— 在标准模式基础上，把首轮工具集裁剪到核心几件，让模型先思考再展开。
@@ -24,46 +24,69 @@
 
 从第二轮开始注入完整工具（subagent、workflow、ralph、skill、goal、plan mode，以及重型文件工具）。
 
-适合希望降低首轮工具噪声、避免模型一上来就误调重型工具的场景。
+适合希望降低首轮工具噪声、避免模型一上来就误调重型工具的场景。详见 [`standard-deferred/README.md`](./standard-deferred/README.md)。
+
+## Bundle 格式说明
+
+每个预设目录都是一个标准的 npm 包：
+
+```
+<preset-id>/
+├── package.json          # 必备：`dsh.bundle.patch` 指向 ./cordis.patch.yml
+├── cordis.patch.yml      # 必备：cordis include 补丁文件（一条 @deepseek-ai/dsh-agent-preset 行）
+├── <preset>.mjs          # 可选：函数插件，由 cordis.patch.yml 用相对路径引用
+└── README.md             # 可选
+```
+
+- `package.json` 的 `dsh.bundle.patch` 字段告诉 DSH 这个包是一个 bundle，以及它的补丁文件位置（参考 [packages/bundle/web-app/package.json:41-50](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/bundle/web-app/package.json)）。
+- `cordis.patch.yml` 是 `@deepseek-ai/cordis-plugin-include` 的 PatchOptions 列表。最外层是一条 `id: preset-<preset-id>`、`name: '@deepseek-ai/dsh-agent-preset'` 的 `insert` 行；其 `config.id` 是预设的展示身份，`config.plugins` 是激活时挂到 preset scope 的 agent-plane 行列表。
+- 没有 `preset.yml` 了 —— `name` / `description` / `order` 字段直接写在 `cordis.patch.yml` 的 preset 行 `config:` 里。
+
+> **为什么 `first-turn-minimal` 在顶层 insert 而不是 preset 内**：见 [standard-deferred/README.md §「钩子的两个 gate」](./standard-deferred/README.md)。简言之：dsh-app-boot 的 `anchorInsertedPluginNames` 只访问顶层 `patch.insert[]` 来锚定 `./xxx.mjs` 相对路径；放在 `config.plugins[]` 里时，路径会被 preset 激活时的 `ctx.baseUrl`（profile 目录）解析，导致「file not found」并把 preset 标为 broken。
 
 ## 安装与启用
 
 ### 前置条件
 
 - 已安装 DeepSeek Harness（`dsh` 命令可用）。
-- Node.js 与 DSH 所需的服务包（DREAM-RSI 默认不需要 `Codex` / `Claude Code` Bundle；如需启用，参见 `agent.cordis.yml` 末尾 `disabled` 行）。
-- `DEEPSEEK_API_KEY`（或其他由你部署使用的模型凭据）。
+- Node.js 与 DSH 所需的服务包。`@deepseek-ai/dsh-*` 系列插件通过已安装的 DSH 实例解析；本仓库两个 bundle 仅依赖用户本地文件系统中的 `package.json` + 补丁文件，不需要额外 npm 包。
+- `DEEPSEEK_API_KEY`（或你部署使用的其他模型凭据）。
 
-### 放置位置
+### 安装步骤
 
-DSH 的代理预设发现会扫描 `<dshHome>/.agent-presets/` 的直接子目录。子目录名 = 预设 ID；每个目录里必须包含 `agent.cordis.yml`（组成声明），可选 `preset.yml` 提供展示元数据（`name` / `description` / `order`）。
+把整个仓库克隆或下载到你机器上的任意目录，然后在 DSH Web GUI 的任意会话里调用 `plugin_manager` 工具：
 
-默认 `<dshHome>` 是 `~/.dsh`，可通过环境变量 `DSH_HOME` 改写。
-
-把两个目录拷贝到本机 `~/.dsh/.agent-presets/` 即可：
-
-```sh
-git clone <this-repo>
-mkdir -p ~/.dsh/.agent-presets
-cp -r <this-repo>/dream-rsi        ~/.dsh/.agent-presets/
-cp -r <this-repo>/standard-deferred ~/.dsh/.agent-presets/
+```text
+plugin_manager
+  action: install_bundle
+  target: <绝对路径>/dream-rsi
 ```
 
-目录拷贝完成后 DSH 会自动重新发现，不需要重启守护进程。如果发现没有刷新，参照 `dsh` 的重启步骤。
+```text
+plugin_manager
+  action: install_bundle
+  target: <绝对路径>/standard-deferred
+```
+
+`install_bundle` 自己会做 pnpm `add file:<bundle-dir>`，把包加进当前 profile 的 `dependencies` 与 `dsh.profile.bundles`，并在 profile 的 `node_modules/@local/<name>` 路径下建立 junction 链接。不需要再手动 `cp -r` 或重启守护进程 —— HMR 监测到 `dsh.profile.bundles` 变化就会刷新 include 层（[packages/boot/hmr/src/index.ts:218-236](https://github.com/deepseek-ai/deepseek-harness/blob/main/packages/boot/hmr/src/index.ts#L218-L236)）。
+
+如果你在启用的子进程里没看到新的 preset 出现在 Web GUI 的模式选择器中，浏览器按 **Ctrl + Shift + R** 强刷一次即可（preset roster 通过 `agentPresets.list()` 在 settings store 初始化时拉一次）。
 
 ### 仓库结构
 
 ```
-.agent-presets/
+.
+├── README.md                      # 本文件
 ├── dream-rsi/
-│   ├── agent.cordis.yml     # 必填：组成声明（persona + 工具集）
-│   ├── preset.yml           # 展示元数据：name / description
-│   ├── dream_rsi.yaml       # 任务级配置（由用户复制到任务工作目录后被 Agent 读取）
-│   └── README.md            # 触发词、字段、硬约束的详细说明
+│   ├── package.json                # bundle 清单
+│   ├── cordis.patch.yml            # @deepseek-ai/dsh-agent-preset 行 + preset 组成
+│   ├── dream_rsi.yaml              # 任务级配置（由用户复制到任务工作目录后被 Agent 读取）
+│   └── README.md                   # A→B→C→D 流程、触发词、字段、硬约束
 └── standard-deferred/
-    ├── agent.cordis.yml     # 必填：在 standard 之上叠加 first-turn-minimal
-    ├── first-turn-minimal.mjs  # 首轮精简钩子
-    └── preset.yml           # 展示元数据
+    ├── package.json                # bundle 清单
+    ├── cordis.patch.yml            # @deepseek-ai/dsh-agent-preset 行 + preset 组成
+    ├── first-turn-minimal.mjs      # 首轮精简函数插件
+    └── README.md                   # 钩子行为、配置、故障排查
 ```
 
 ### 验证发现
@@ -75,10 +98,14 @@ cp -r <this-repo>/standard-deferred ~/.dsh/.agent-presets/
 
 如果下拉列表里没出现，按下列顺序排查：
 
-1. 目录名是否合法（必须匹配 DSH 的预设 ID 正则；保持 `dream-rsi` / `standard-deferred` 原名即可）。
-2. `agent.cordis.yml` 是否存在且可读（读取 YAML，校验每行至少含 `name` 字段）。
-3. `agent.cordis.yml` 里命名的包是否在当前 `node_modules` 中可解析；DSH 会把无法解析的预设标为 `broken` 并在下拉列表里隐藏而不是显示错误。
-4. 查看 DSH 日志中形如 `agent-presets: preset "<id>" failed to mount: ...` 的报错以定位问题。
+1. bundle 目录里 `package.json` 的 `dsh.bundle.patch` 是否正确指向 `cordis.patch.yml`（保持现有写法即可）。
+2. `cordis.patch.yml` 是否存在且可读；DSH 会读它并校验每条 `name` 字段。
+3. `cordis.patch.yml` 里命名的 `@deepseek-ai/dsh-*` 包是否在当前 DSH 进程的 `node_modules` 中可解析；解析不到的包会让 preset 标为 `broken` 并在下拉列表里隐藏（不显示错误）。
+4. 看 DSH 日志（`$DSH_HOME/logs/startup-*.log`）里有没有 `agent-presets: preset "<id>" failed to mount: <reason>` 的报错。最常见的原因：
+   - `cordis.patch.yml` 里的某个 `@deepseek-ai/...` 包未安装；
+   - `disabled: !!js ...` 之类的 JS 表达式抛错；
+   - 工具组（`cordis:group`）的 `isolate` 漏声明，导致 service 被发布到 root realm 触发 `leakedServices` 检查；
+   - 相对路径 `./xxx.mjs` 没被锚定到 patch 文件目录（参见 [上一节](#为什么-first-turn-minimal-在顶层-insert-而不是-preset-内)）。
 
 ## 配置 `dream-rsi`
 
@@ -89,33 +116,26 @@ cp -r <this-repo>/standard-deferred ~/.dsh/.agent-presets/
 3. **确认 `paths.forbidden_paths`** 完整覆盖评估器、数据集、提交接口等不可触碰范围（这是 DREAM-RSI 硬约束的强制来源之一）。
 4. **设置预算**：`budget.total_calls`、`budget.total_time`、`budget.total_rounds`，以及 `budget.dreaming_candidates`（每轮候选策略数 M）。并行度调 `parallelism.W`。
 5. 在 DSH Web GUI 中选择 **DREAM-RSI 模式**，新建会话，先发初始化触发词，再按 `budget.total_rounds` 每轮替换 `{t}` 发标准触发词。
-6. 预算耗尽 / 目标达成后，发收尾触发词；只想做离线策略 dreaming 时，使用“仅 dreaming / 回放”触发词。
+6. 预算耗尽 / 目标达成后，发收尾触发词；只想做离线策略 dreaming 时，使用「仅 dreaming / 回放」触发词。
 
-如果安装对应的 Bundle（如 Codex / Claude Code 行），去掉 `agent.cordis.yml` 里相应 `disabled: true` 行即可启用对应的子代理提供者。
+如果安装对应的 Bundle（如 Codex / Claude Code 行），去掉 `cordis.patch.yml` 里相应 `disabled: true` 行即可启用对应的子代理提供者。
 
 ## 配置 `standard-deferred`
 
-该预设在 DSH 行为层面没有需要填空的任务级文件，但支持按下列行为定制：
+该预设在 DSH 行为层面没有需要填空的任务级文件，但支持按下列行为定制（详见 [`standard-deferred/README.md`](./standard-deferred/README.md)）：
 
-- **调整首轮保留的工具**：编辑 `standard-deferred/agent.cordis.yml` 中 `first-turn-minimal` 行的 `minimalTools` 列表，按需增删。需要保留的字符串是 DSH 给模型暴露的工具名（出现在系统提示 `tools` 数组中的 `name` 字段），例如 `ask_user_question` / `pwsh` / `read` / `edit` / `glob` / `grep` 等。
-- **完全关闭首轮精简**：把 `agent.cordis.yml` 里的 `first-turn-minimal` 整段删掉，该预设就退化为内置 `standard` 预设。
-- **启用 Codex / Claude Code 子代理**：去掉 `agent.cordis.yml` 中 `tool-subagent-codex` / `tool-subagent-claude-code` 两行的 `disabled: true`，并在 DSH Profile 中安装对应 Bundle。
+- **调整首轮保留的工具**：编辑 `standard-deferred/cordis.patch.yml` 中 `first-turn-minimal` 行的 `minimalTools` 列表，按需增删。
+- **完全关闭首轮精简**：把 `cordis.patch.yml` 中整个 `first-turn-minimal` 顶层行删掉，该预设就退化为内置 `standard` 预设。
+- **启用 Codex / Claude Code 子代理**：去掉 `cordis.patch.yml` 中 `tool-subagent-codex` / `tool-subagent-claude-code` 两行的 `disabled: true`，并在 DSH Profile 中安装对应 Bundle。
 
-修改完成后保存即可，DSH 的代理预设发现是 live 读取的，下一次会话发起时生效。
-
-## 排错
-
-- **预设出现在列表里但开启失败**：查看 DSH 日志中的 `agent-presets: preset "<id>" failed to mount: <reason>`。常见原因：`agent.cordis.yml` 中的某个 `@deepseek-ai/...` 包未安装；`disabled: !!js ...` 的 JS 表达式抛出；工具组（`cordis:group`）中的 `isolate` 漏声明。
-- **`dream-rsi` 跑起来但不写文件**：检查 `dream_rsi.yaml` 中的 `paths.allowed_paths` 是否覆盖任务工作目录；路径前缀必须与 Agent 在 shell 里 cd 后的绝对路径一致。
-- **`standard-deferred` 首轮看不到预期工具**：检查 `minimalTools` 是否误删；钩子只在全新会话的首次装配触发，被恢复的会话、fork 出来的子代理都不会被裁剪，这是预期行为。
-- **同时安装多个版本的预设**：`<dshHome>/.agent-presets/` 的预设 id 与 DSH 内置预设（`standard` / `minimal` 等）冲突时，本机预设会覆盖内置；非冲突的情况下两者并存。
+修改完成后保存即可，DSH 的 include 层是 live 读取的，下次新会话发起时生效。
 
 ## 协议与贡献
 
-本仓库以 MIT 协议发布，包含的全部 YAML、ESM 与文档可自由使用、修改、再发布。在你自己的项目中使用这两个预设时，请保留 `preset.yml` 与 `agent.cordis.yml` 头部注释里关于原作者与 DREAM-RSI 论文来源的标注。
+本仓库以 MIT 协议发布，包含的全部 YAML、ESM 与文档可自由使用、修改、再发布。在你自己的项目中使用这两个预设时，请保留 `cordis.patch.yml` 头部注释里关于原作者与 DREAM-RSI 论文来源的标注。
 
 欢迎以 PR 形式提交：
 
-- 新预设（在 `agent-presets/<your-preset>/` 下提交 `agent.cordis.yml` + `preset.yml`，外加一份 README）。
+- 新预设（在 `<your-preset>/` 下提交 `package.json` + `cordis.patch.yml` + README，按 `dream-rsi/` 或 `standard-deferred/` 的写法套）。
 - 对现有预设的 bug fix、文档改进、默认参数调整。
 - 真实任务上的 DREAM-RSI 评测案例与配置示例（作为 issue 附件提交即可）。
